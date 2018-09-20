@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright (C) <2015> EMBL-European Bioinformatics Institute
 
 # This program is free software: you can redistribute it and/or
@@ -33,8 +33,8 @@ def get_options():
     parser = argparse.ArgumentParser(description = description,
                                      prog = 'roary_plots.py')
 
-    parser.add_argument('tree', action='store',
-                        help='Newick Tree file', default='accessory_binary_genes.fa.newick')
+    #parser.add_argument('tree', action='store',
+    #                    help='Newick Tree file', default='accessory_binary_genes.fa.newick')
     parser.add_argument('spreadsheet', action='store',
                         help='Roary gene presence/absence spreadsheet', default='gene_presence_absence.csv')
 
@@ -52,11 +52,43 @@ def get_options():
                         type=int,
                         default=14,
                         help='First N columns of Roary\'s output to exclude [Default: 14]')
+    parser.add_argument('--tree-only', action='store_true', help="Only save a tree in phylip format")
     
     parser.add_argument('--version', action='version',
                          version='%(prog)s '+__version__)
 
     return parser.parse_args()
+
+
+def ctree_to_phylotree(t,nodenames=None):
+    """Creates a Bio.Phylo.Tree from a Bio.Cluster.Tree using single linkage clustering"""
+    nodes = list()
+    for n in t:
+        node = Phylo.BaseTree.Clade()
+        for child in (n.left, n.right):
+            if child >= 0: # Leaf node
+                sub_node = Phylo.BaseTree.Clade(branch_length=n.distance, name=nodenames[child])
+                sub_node.cumlength = n.distance
+            else: # Internal node
+                sub_node = nodes[-child-1]
+                sub_node.branch_length = n.distance-max(
+                    [c.cumlength for c in sub_node.clades])
+                sub_node.cumlength = n.distance
+            node.clades.append(sub_node)
+        nodes.append(node)
+    return Phylo.BaseTree.Tree(root=nodes[-1])
+    
+def binary_distance_tree(m, nodenames=None):
+    """Calculates a tree from single linkage clustering using Jaccard distances."""
+    n = m.shape[1]
+    if nodenames is None:
+        nodenames = list(range(n))
+    distmat = squareform(pdist(m.transpose(), 'jaccard'))
+    
+    print(len(distmat))
+    ctree = Cluster.treecluster(data=None,distancematrix=distmat,method='s')
+    return ctree_to_phylotree(ctree, nodenames)
+    
 
 if __name__ == "__main__":
     options = get_options()
@@ -70,18 +102,19 @@ if __name__ == "__main__":
     sns.set_style('white')
 
     import os
+    import sys
     import pandas as pd
     import numpy as np
     from Bio import Phylo
+    from Bio import Cluster
+    from scipy.spatial.distance import pdist, jaccard
+    from scipy.spatial.distance import squareform
 
-    t = Phylo.read(options.tree, 'newick')
-
-    # Max distance to create better plots
-    mdist = max([t.distance(t.root, x) for x in t.get_terminals()])
 
     # Load roary
     roary = pd.read_table(options.spreadsheet,
-                         sep=',',
+                         sep='\t',
+                         #sep=',',
                          low_memory=False)
     # Set index (group name)
     roary.set_index('Gene', inplace=True)
@@ -91,27 +124,49 @@ if __name__ == "__main__":
     # Transform it in a presence/absence matrix (1/0)
     roary.replace('.{2,100}', 1, regex=True, inplace=True)
     roary.replace(np.nan, 0, regex=True, inplace=True)
+    roary = roary.astype(dtype="bool")
 
     # Sort the matrix by the sum of strains presence
-    idx = roary.sum(axis=1).sort_values(ascending=False).index
-    roary_sorted = roary.loc[idx]
+    # idx = roary.sum(axis=1).sort_values(ascending=False).index
+    # roary_sorted = roary.loc[idx]
 
-    # Pangenome frequency plot
-    plt.figure(figsize=(7, 5))
+    # # Pangenome frequency plot
+    # plt.figure(figsize=(7, 5))
 
-    plt.hist(roary.sum(axis=1), roary.shape[1],
-             histtype="stepfilled", alpha=.7)
+    # plt.hist(roary.sum(axis=1), roary.shape[1],
+    #          histtype="stepfilled", alpha=.7)
 
-    plt.xlabel('No. of genomes')
-    plt.ylabel('No. of genes')
+    # plt.xlabel('No. of genomes')
+    # plt.ylabel('No. of genes')
 
-    sns.despine(left=True,
-                bottom=True)
-    plt.savefig('pangenome_frequency.%s'%options.format, dpi=300)
-    plt.clf()
+    # sns.despine(left=True,
+    #             bottom=True)
+    # plt.savefig('pangenome_frequency.%s'%options.format, dpi=300)
+    # plt.clf()
+
+
+    #t = Phylo.read(options.tree, 'newick')
+    t = binary_distance_tree(roary, list(roary.keys()))
+    with open("pangenome.distance.nwk","w") as fh:
+        Phylo.NewickIO.write([t],fh)
+    if options.tree_only == True:
+        sys.exit()
+    # Sort the matrix according to tip labels in the tree
+    roary_sorted = roary[[x.name for x in t.get_terminals()]]
+    
+    troary = roary_sorted.transpose()
+    t_transposed = binary_distance_tree(troary, list(troary.keys()))
 
     # Sort the matrix according to tip labels in the tree
-    roary_sorted = roary_sorted[[x.name for x in t.get_terminals()]]
+    troary_sorted = troary[[x.name for x in t_transposed.get_terminals()]]
+
+    roary_sorted = troary_sorted.transpose()
+
+    # Max distance to create better plots
+    mdist = max([t.distance(t.root, x) for x in t.get_terminals()])
+
+
+
 
     # Plot presence/absence matrix against the tree
     with sns.axes_style('whitegrid'):
